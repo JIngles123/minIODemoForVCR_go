@@ -60,7 +60,13 @@ func main() {
 				printOptions()
 				continue
 			}
-			// 直接调server接口上传文件到minIO
+			fmt.Println("上传中...")
+			if uploadFileViaServer(camID, sessionID, fileName, path) {
+				fmt.Println("上传成功")
+				addUploadedFlagToFileOrDir(path)
+			} else {
+				fmt.Println("上传失败")
+			}
 		} else if line == "4" { // 获取预签名url上传
 			fmt.Println("输入要上传的 camID|sessionID|fileName :")
 			scanner.Scan()
@@ -138,7 +144,7 @@ func printOptions() {
 }
 
 func queryAllSessionsListNeedUpload(isNeedUploaded bool) []string {
-	// 目录结构：root/camID/sessionID/fileName...
+	// 目录结构：root/camID/sessionID/fileName
 	// 返回格式：camID|sessionID|fileName
 	root := "./EvtvcrForTest"
 	list := make([]string, 0)
@@ -213,6 +219,47 @@ func getPresignedUrl(camID, sessionID, fileName string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(body))
+}
+
+func uploadFileViaServer(camID, sessionID, fileName, path string) bool {
+	fi, err := os.Open(path)
+	if err != nil {
+		fmt.Println("打开文件失败:", err)
+		return false
+	}
+	defer fi.Close()
+
+	stat, err := fi.Stat()
+	if err != nil {
+		fmt.Println("读取文件信息失败:", err)
+		return false
+	}
+
+	reqURL := serverBaseURL + "/upload?" + url.Values{
+		"bucket": {"evtvcr"},
+		"key":    {camID + "/" + sessionID + "/" + fileName},
+	}.Encode()
+
+	req, err := http.NewRequest(http.MethodPost, reqURL, fi)
+	if err != nil {
+		fmt.Println("创建上传请求失败:", err)
+		return false
+	}
+	req.ContentLength = stat.Size()
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Println("上传失败:", err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		fmt.Println("上传失败:", resp.Status, strings.TrimSpace(string(body)))
+		return false
+	}
+	return true
 }
 
 // 执行预签名url上传文件
