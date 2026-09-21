@@ -39,7 +39,10 @@ func main() {
 				fmt.Println(item)
 			}
 			fmt.Println("共", len(list), "个录像")
-		} else if line == "3" { // 直接上传
+		} else if line == "3" { // 获取minIO上已上传的文件列表
+			fmt.Println("MinIO 上已有的文件列表:")
+			listMinioObjects()
+		} else if line == "4" { // 直接上传
 			fmt.Println("输入要上传的 camID|sessionID|fileName :")
 			scanner.Scan()
 			line := scanner.Text()
@@ -67,7 +70,7 @@ func main() {
 			} else {
 				fmt.Println("上传失败")
 			}
-		} else if line == "4" { // 获取预签名url上传
+		} else if line == "5" { // 获取预签名url上传
 			fmt.Println("输入要上传的 camID|sessionID|fileName :")
 			scanner.Scan()
 			line := scanner.Text()
@@ -114,9 +117,9 @@ func main() {
 				printOptions()
 				continue
 			}
-		} else if line == "5" { // 直接下载
+		} else if line == "6" { // 直接下载
 			fmt.Println("请输入camID-sessionID:")
-		} else if line == "6" { // 获取预签名url下载
+		} else if line == "7" { // 获取预签名url下载
 			fmt.Println("请输入camID-sessionID:")
 		}
 
@@ -137,10 +140,11 @@ func printOptions() {
 	fmt.Printf("\n[%s] 输入内容（输入 quit or q 退出）：\n", time.Now().Format("2006-01-02 15:04:05"))
 	fmt.Println("1. 查询当前所有待上传的文件列表")
 	fmt.Println("2. 查询当前所有上传成功的文件列表")
-	fmt.Println("3. 输入要上传的session文件(camID|sessionID|fileName), 直接上传")
-	fmt.Println("4. 输入要上传的session文件(camID|sessionID|fileName), 获取预签名url")
-	fmt.Println("5. 输入要下载的session文件(camID|sessionID|fileName), 直接下载")
-	fmt.Println("6. 输入要下载的session文件(camID|sessionID|fileName), 获取预签名url")
+	fmt.Println("3. 查询MinIO上已有的文件列表")
+	fmt.Println("4. 输入要上传的session文件(camID|sessionID|fileName), 直接上传")
+	fmt.Println("5. 输入要上传的session文件(camID|sessionID|fileName), 获取预签名url")
+	fmt.Println("6. 输入要下载的session文件(camID|sessionID|fileName), 直接下载")
+	fmt.Println("7. 输入要下载的session文件(camID|sessionID|fileName), 获取预签名url")
 }
 
 func queryAllSessionsListNeedUpload(isNeedUploaded bool) []string {
@@ -260,6 +264,33 @@ func uploadFileViaServer(camID, sessionID, fileName, path string) bool {
 		return false
 	}
 	return true
+}
+
+func listMinioObjects() {
+	reqURL := serverBaseURL + "/list?" + url.Values{
+		"bucket": {"evtvcr"},
+	}.Encode()
+
+	resp, err := http.Get(reqURL)
+	if err != nil {
+		fmt.Println("请求文件列表失败:", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Println("读取文件列表失败:", err)
+		return
+	}
+	if resp.StatusCode != http.StatusOK {
+		fmt.Println("请求文件列表失败:", resp.Status, strings.TrimSpace(string(body)))
+		return
+	}
+	fmt.Print(string(body))
+	if len(body) > 0 && body[len(body)-1] != '\n' {
+		fmt.Println()
+	}
 }
 
 // 执行预签名url上传文件
