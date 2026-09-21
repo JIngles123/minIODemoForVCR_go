@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -13,21 +14,24 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 )
 
 // ---------- 配置 ----------
 const (
-	MinioEndpoint  = "http://localhost:9090" // 你的 MinIO 地址
+	MinioEndpoint  = "http://localhost:9000" // 你的 MinIO 地址
 	MinioAccessKey = "jlmtest"               // 默认用户名
 	MinioSecretKey = "jlmtestpwd"            // 默认密码
 	MinioBucket    = "evtvcr"
 	ListenAddr     = ":9097"
-	PresignExpire  = 15 * time.Minute
+	PresignExpire  = 10 * time.Minute
 )
 
 // ---------- S3 客户端初始化 ----------
 func NewS3Client() *s3.Client {
-	cfg, err := config.LoadDefaultConfig(context.TODO(),
+	cfg, err := config.LoadDefaultConfig(
+		context.TODO(),
 		config.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(MinioAccessKey, MinioSecretKey, ""),
 		),
@@ -47,6 +51,9 @@ var s3Client *s3.Client
 
 func main() {
 	s3Client = NewS3Client()
+	if err := ensureBucket(context.TODO(), s3Client, MinioBucket); err != nil {
+		log.Fatalf("无法准备桶 %s: %v", MinioBucket, err)
+	}
 
 	http.HandleFunc("/upload", handleUpload)
 	http.HandleFunc("/download", handleDownload)
@@ -55,6 +62,37 @@ func main() {
 
 	log.Printf("HTTP Server 启动，监听 %s", ListenAddr)
 	log.Fatal(http.ListenAndServe(ListenAddr, nil))
+}
+
+func ensureBucket(ctx context.Context, client *s3.Client, bucket string) error {
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
+		Bucket: aws.String(bucket),
+	})
+	if err == nil {
+		log.Printf("已创建桶 %s", bucket)
+		return nil
+	}
+	if isBucketAlreadyExists(err) {
+		log.Printf("桶 %s 已存在，跳过创建", bucket)
+		return nil
+	}
+	return err
+}
+
+func isBucketAlreadyExists(err error) bool {
+	var alreadyOwned *types.BucketAlreadyOwnedByYou
+	var alreadyExists *types.BucketAlreadyExists
+	if errors.As(err, &alreadyOwned) || errors.As(err, &alreadyExists) {
+		return true
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.ErrorCode() {
+		case "BucketAlreadyOwnedByYou", "BucketAlreadyExists":
+			return true
+		}
+	}
+	return false
 }
 
 // ---------- 上传处理 ----------
@@ -149,12 +187,13 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 func handlePresign(w http.ResponseWriter, r *http.Request) {
 	camID := r.URL.Query().Get("camID")
 	sessionID := r.URL.Query().Get("sessionID")
-	if camID == "" || sessionID == "" {
+	fileName := r.URL.Query().Get("fileName")
+	if camID == "" || sessionID == "" || fileName == "" {
 		http.Error(w, "缺少 camID 或 sessionID 参数", http.StatusBadRequest)
 		return
 	}
 
-	key := camID + "/" + sessionID
+	key := camID + "/" + sessionID + "/" + fileName
 	presignClient := s3.NewPresignClient(s3Client)
 	out, err := presignClient.PresignPutObject(context.TODO(), &s3.PutObjectInput{
 		Bucket: aws.String(MinioBucket),
