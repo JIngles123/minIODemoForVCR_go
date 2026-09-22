@@ -60,6 +60,7 @@ func main() {
 	http.HandleFunc("/download", handleDownload)
 	http.HandleFunc("/list", handleList)
 	http.HandleFunc("/presign", handlePresign)
+	http.HandleFunc("/delete", handleDelete)
 
 	log.Printf("HTTP Server 启动，监听 %s", ListenAddr)
 	log.Fatal(http.ListenAndServe(ListenAddr, nil))
@@ -186,6 +187,7 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 		fileName := strings.Split(keyStr, "/")[2]
 		fmt.Fprintf(w, "- %s (大小: %d 字节) -> %s\n", *obj.Key, obj.Size, camID + "|" + sessionID + "|" + fileName)
 	}
+	fmt.Fprintf(w, "共 %d 个文件\n", len(output.Contents))
 }
 
 // ---------- 预签名 URL ----------
@@ -227,4 +229,25 @@ func handlePresign(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	fmt.Fprint(w, outURL)
+}
+
+func handleDelete(w http.ResponseWriter, r *http.Request) {
+	bucket := r.URL.Query().Get("bucket")
+	key := r.URL.Query().Get("key")
+	if bucket == "" || key == "" {
+		http.Error(w, "缺少 bucket 或 key 参数", http.StatusBadRequest)
+		return
+	}
+
+	_, err := s3Client.DeleteObject(context.TODO(), &s3.DeleteObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		http.Error(w, "删除失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	fmt.Fprintf(w, "删除成功: %s/%s\n", bucket, key)
 }

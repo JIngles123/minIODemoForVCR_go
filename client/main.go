@@ -31,18 +31,39 @@ func main() {
 			for _, item := range list {
 				fmt.Println(item)
 			}
-			fmt.Println("共", len(list), "个录像")
+			fmt.Println("共", len(list), "个文件")
 		} else if line == "2" {
 			fmt.Println("当前所有上传成功的文件列表(camID|sessionID|fileName):")
 			var list []string = queryAllSessionsListNeedUpload(false)
 			for _, item := range list {
 				fmt.Println(item)
 			}
-			fmt.Println("共", len(list), "个录像")
+			fmt.Println("共", len(list), "个文件")
 		} else if line == "3" { // 获取minIO上已上传的文件列表
 			fmt.Println("MinIO 上已有的文件列表:")
 			listMinioObjects()
-		} else if line == "4" { // 直接上传
+		} else if line == "4" { // 删除MinIO上的指定文件
+			fmt.Println("输入要删除的 camID|sessionID|fileName :")
+			scanner.Scan()
+			line := scanner.Text()
+			var parts []string = strings.Split(line, "|")
+			if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+				fmt.Println("camID|sessionID|fileName格式错误")
+				printOptions()
+				continue
+			}
+			var camID string = parts[0]
+			var sessionID string = parts[1]
+			var fileName string = parts[2]
+			fmt.Println("camID:", camID, ", sessionID:", sessionID, ", fileName:", fileName)
+			fmt.Println("删除中...")
+			if deleteObjectFromMinio(camID, sessionID, fileName) {
+				// 调整本地文件的uploaded标记，删除后，需要删除本地文件的uploaded标记，删除成功后，如果sessionID有uploaded后缀，也清除（因为sessionID的uploaded标记是整体session的）
+				addOrRemoveUploadedFlagToFileOrDir(filepath.Join("./EvtvcrForTest", camID, sessionID, fileName), false)
+			} else {
+				fmt.Println("删除失败")
+			}
+		}else if line == "5" { // 直接上传
 			fmt.Println("输入要上传的 camID|sessionID|fileName :")
 			scanner.Scan()
 			line := scanner.Text()
@@ -65,12 +86,11 @@ func main() {
 			}
 			fmt.Println("上传中...")
 			if uploadFileViaServer(camID, sessionID, fileName, path) {
-				fmt.Println("上传成功")
-				addUploadedFlagToFileOrDir(path)
+				addOrRemoveUploadedFlagToFileOrDir(path, true)
 			} else {
 				fmt.Println("上传失败")
 			}
-		} else if line == "5" { // 获取预签名url上传
+		} else if line == "6" { // 获取预签名url上传
 			fmt.Println("输入要上传的 camID|sessionID|fileName :")
 			scanner.Scan()
 			line := scanner.Text()
@@ -105,8 +125,7 @@ func main() {
 				fmt.Println("上传中...")
 				isSuccess := runPresignedURLForUpload(presignedURL, path)
 				if isSuccess {
-					fmt.Println("上传成功")
-					addUploadedFlagToFileOrDir(path)
+					addOrRemoveUploadedFlagToFileOrDir(path, true)
 				} else {
 					fmt.Println("上传失败")
 				}
@@ -117,7 +136,7 @@ func main() {
 				printOptions()
 				continue
 			}
-		} else if line == "6" { // 直接下载
+		} else if line == "7" { // 直接下载
 			fmt.Println("输入要下载的 camID|sessionID|fileName :")
 			scanner.Scan()
 			line := scanner.Text()
@@ -138,7 +157,7 @@ func main() {
 			} else {
 				fmt.Println("下载失败")
 			}
-		} else if line == "7" { // 获取预签名url下载
+		} else if line == "8" { // 获取预签名url下载
 			fmt.Println("输入要下载的 camID|sessionID|fileName :")
 			scanner.Scan()
 			line := scanner.Text()
@@ -202,10 +221,11 @@ func printOptions() {
 	fmt.Println("1. 查询当前所有待上传的文件列表")
 	fmt.Println("2. 查询当前所有上传成功的文件列表")
 	fmt.Println("3. 查询MinIO上已有的文件列表")
-	fmt.Println("4. 输入要上传的session文件(camID|sessionID|fileName), 直接上传")
-	fmt.Println("5. 输入要上传的session文件(camID|sessionID|fileName), 获取预签名url")
-	fmt.Println("6. 输入要下载的session文件(camID|sessionID|fileName), 直接下载")
-	fmt.Println("7. 输入要下载的session文件(camID|sessionID|fileName), 获取预签名url")
+	fmt.Println("4. 删除MinIO上的指定文件")
+	fmt.Println("5. 输入要上传的session文件(camID|sessionID|fileName), 直接上传")
+	fmt.Println("6. 输入要上传的session文件(camID|sessionID|fileName), 获取预签名url")
+	fmt.Println("7. 输入要下载的session文件(camID|sessionID|fileName), 直接下载")
+	fmt.Println("8. 输入要下载的session文件(camID|sessionID|fileName), 获取预签名url")
 }
 
 func queryAllSessionsListNeedUpload(isNeedUploaded bool) []string {
@@ -328,6 +348,9 @@ func uploadFileViaServer(camID, sessionID, fileName, path string) bool {
 		fmt.Println("上传失败:", resp.Status, strings.TrimSpace(string(body)))
 		return false
 	}
+	if msg := strings.TrimSpace(string(body)); msg != "" {
+		fmt.Println(msg)
+	}
 	return true
 }
 
@@ -356,6 +379,34 @@ func listMinioObjects() {
 	if len(body) > 0 && body[len(body)-1] != '\n' {
 		fmt.Println()
 	}
+}
+
+func deleteObjectFromMinio(camID, sessionID, fileName string) bool {
+	reqURL := serverBaseURL + "/delete?" + url.Values{
+		"bucket": {"evtvcr"},
+		"key":    {camID + "/" + sessionID + "/" + fileName},
+	}.Encode()
+
+	resp, err := http.Get(reqURL)
+	if err != nil {
+		fmt.Println("删除文件失败:", err)
+		return false
+	}
+	defer resp.Body.Close()
+	
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Println("读取删除文件失败:", err)
+		return false
+	}
+	if resp.StatusCode != http.StatusOK {
+		fmt.Println("删除文件失败:", resp.Status, strings.TrimSpace(string(body)))
+		return false
+	}
+	if msg := strings.TrimSpace(string(body)); msg != "" {
+		fmt.Println(msg)
+	}
+	return true
 }
 
 // 执行预签名url上传文件
@@ -391,6 +442,17 @@ func runPresignedURLForUpload(presignedURL, path string) bool {
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		fmt.Println("上传失败:", resp.Status, strings.TrimSpace(string(body)))
 		return false
+	}
+	if msg := strings.TrimSpace(string(body)); msg != "" {
+		fmt.Println(msg)
+	} else {
+		u, err := url.Parse(presignedURL)
+		if err != nil {
+			fmt.Println("上传成功: ", presignedURL)
+		} else {
+			remotePath := strings.TrimPrefix(u.Path, "/")
+			fmt.Println("上传成功: ", remotePath)
+		}
 	}
 	return true
 }
@@ -442,9 +504,33 @@ func runPresignedURLForDownload(presignedURL, path string) bool {
 	return true
 }
 
-// 将此文件末尾添加 uploaded 标记，如果当前文件夹下全部文件都已上传，则将文件夹末尾添加 uploaded 标记
-func addUploadedFlagToFileOrDir(path string) {
+// isAdd=true：给文件加上 .uploaded；该目录下文件都已标记时，再给 session 目录加上 .uploaded。
+// isAdd=false：去掉文件的 .uploaded；若 session 目录带了 .uploaded，一并去掉（目录标记表示整个 session 已上传）。
+func addOrRemoveUploadedFlagToFileOrDir(path string, isAdd bool) {
 	const flag = ".uploaded"
+
+	if !isAdd {
+		actual, err := resolveLocalUploadPath(path, flag)
+		if err != nil {
+			fmt.Println("清除uploaded标记失败:", err)
+			return
+		}
+		if strings.HasSuffix(filepath.Base(actual), flag) {
+			newPath := strings.TrimSuffix(actual, flag)
+			if err := os.Rename(actual, newPath); err != nil {
+				fmt.Println("文件清除uploaded标记失败:", err)
+				return
+			}
+			actual = newPath
+		}
+		dir := filepath.Dir(actual)
+		if strings.HasSuffix(filepath.Base(dir), flag) {
+			if err := os.Rename(dir, strings.TrimSuffix(dir, flag)); err != nil {
+				fmt.Println("文件夹清除uploaded标记失败:", err)
+			}
+		}
+		return
+	}
 
 	info, err := os.Stat(path)
 	if err != nil {
@@ -495,6 +581,30 @@ func addUploadedFlagToFileOrDir(path string) {
 	if err := os.Rename(dir, dir+flag); err != nil {
 		fmt.Println("文件夹添加uploaded标记失败:", err)
 	}
+}
+
+func resolveLocalUploadPath(path, flag string) (string, error) {
+	candidates := []string{path, path + flag}
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
+	altDir := dir + flag
+	candidates = append(candidates,
+		filepath.Join(altDir, base),
+		filepath.Join(altDir, base+flag),
+	)
+	if strings.HasSuffix(base, flag) {
+		plain := strings.TrimSuffix(base, flag)
+		candidates = append(candidates,
+			filepath.Join(dir, plain),
+			filepath.Join(altDir, plain),
+		)
+	}
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("本地文件不存在: %s", path)
 }
 
 // 下载文件到当前目录，返回是否成功以及本地保存路径。

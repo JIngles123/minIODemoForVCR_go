@@ -1,5 +1,17 @@
 # minIODemoForVCR_go
 
+功能：go实现的，与MinIO交互的文件上传下载Demo，终端程序
+
+Demo细分的功能点：
+1. 查询当前所有待上传的文件列表
+2. 查询当前所有上传成功的文件列表 -> 对本地文件的核查，已上传的会在上传成功后，在文件或整体session后+uploaded标记
+3. 查询MinIO上已有的文件列表
+4. 删除MinIO上的指定文件
+5. 输入要上传的session文件(camID|sessionID|fileName), 直接上传
+6. 输入要上传的session文件(camID|sessionID|fileName), 获取预签名url
+7. 输入要下载的session文件(camID|sessionID|fileName), 直接下载
+8. 输入要下载的session文件(camID|sessionID|fileName), 获取预签名url
+
 测试：
 
 client:
