@@ -188,7 +188,7 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ---------- 预签名 URL（上传 PUT，整个 session 一个对象，不做切片） ----------
+// ---------- 预签名 URL ----------
 func handlePresign(w http.ResponseWriter, r *http.Request) {
 	camID := r.URL.Query().Get("camID")
 	sessionID := r.URL.Query().Get("sessionID")
@@ -200,15 +200,31 @@ func handlePresign(w http.ResponseWriter, r *http.Request) {
 
 	key := camID + "/" + sessionID + "/" + fileName
 	presignClient := s3.NewPresignClient(s3Client)
-	out, err := presignClient.PresignPutObject(context.TODO(), &s3.PutObjectInput{
-		Bucket: aws.String(MinioBucket),
-		Key:    aws.String(key),
-	}, s3.WithPresignExpires(PresignExpire))
-	if err != nil {
-		http.Error(w, "生成预签名url失败: "+err.Error(), http.StatusInternalServerError)
-		return
+	isDownload := r.URL.Query().Get("download") == "true" || r.URL.Query().Get("download") == "1"
+
+	var outURL string
+	if isDownload {
+		out, err := presignClient.PresignGetObject(context.TODO(), &s3.GetObjectInput{
+			Bucket: aws.String(MinioBucket),
+			Key:    aws.String(key),
+		}, s3.WithPresignExpires(PresignExpire))
+		if err != nil {
+			http.Error(w, "生成预签名url失败: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		outURL = out.URL
+	} else {
+		out, err := presignClient.PresignPutObject(context.TODO(), &s3.PutObjectInput{
+			Bucket: aws.String(MinioBucket),
+			Key:    aws.String(key),
+		}, s3.WithPresignExpires(PresignExpire))
+		if err != nil {
+			http.Error(w, "生成预签名url失败: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		outURL = out.URL
 	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	fmt.Fprint(w, out.URL)
+	fmt.Fprint(w, outURL)
 }

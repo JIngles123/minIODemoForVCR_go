@@ -91,7 +91,7 @@ func main() {
 				printOptions()
 				continue
 			}
-			presignedURL := getPresignedUrl(camID, sessionID, fileName)
+			presignedURL := getPresignedUrl(camID, sessionID, fileName, false)
 			if presignedURL == "" {
 				fmt.Println("获取预签名url失败")
 				printOptions()
@@ -113,7 +113,7 @@ func main() {
 				printOptions()
 				continue
 			} else {
-				fmt.Println("取消上传，可后续自行上传")
+				fmt.Println("取消上传，可后续自行执行curl命令上传")
 				printOptions()
 				continue
 			}
@@ -139,7 +139,49 @@ func main() {
 				fmt.Println("下载失败")
 			}
 		} else if line == "7" { // 获取预签名url下载
-			fmt.Println("请输入camID-sessionID:")
+			fmt.Println("输入要下载的 camID|sessionID|fileName :")
+			scanner.Scan()
+			line := scanner.Text()
+			var parts []string = strings.Split(line, "|")
+			if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+				fmt.Println("camID|sessionID|fileName格式错误")
+				printOptions()
+				continue
+			}
+			var camID string = parts[0]
+			var sessionID string = parts[1]
+			var fileName string = parts[2]
+			fmt.Println("camID:", camID, ", sessionID:", sessionID, ", fileName:", fileName)
+
+			// 检查文件夹是否存在
+			localDir := filepath.Join(".", "client", "PresignedURLDownloadFromMinIO")
+			if err := os.MkdirAll(localDir, 0o755); err != nil {
+				fmt.Println("创建本地下载目录失败:", err)
+				printOptions()
+				continue
+			}
+			presignedURL := getPresignedUrl(camID, sessionID, fileName, true)
+			if presignedURL == "" {
+				fmt.Println("获取预签名url失败")
+				printOptions()
+				continue
+			}
+			fmt.Println("预签名url(有效期10分钟):", presignedURL)
+			fmt.Println("是否下载(y/n):")
+			scanner.Scan()
+			line = scanner.Text()
+			if line == "y" {
+				fmt.Println("下载中...")
+				path := filepath.Join(localDir, filepath.Base(fileName))
+				isSuccess := runPresignedURLForDownload(presignedURL, path)
+				if isSuccess {
+					fmt.Println("下载成功，文件已保存到:", path)
+				} else {
+					fmt.Println("下载失败")
+				}
+			} else {
+				fmt.Println("取消下载，可后续自行执行curl命令下载")
+			}
 		}
 
 		// 退出条件
@@ -217,13 +259,17 @@ func queryAllSessionsListNeedUpload(isNeedUploaded bool) []string {
 	return list
 }
 
-// getPresignedUrl 向 server 申请上传用预签名 URL。
-func getPresignedUrl(camID, sessionID, fileName string) string {
-	reqURL := serverBaseURL + "/presign?" + url.Values{
+// 向server申请上传或下载的预签名URL
+func getPresignedUrl(camID, sessionID, fileName string, isDownload bool) string {
+	q := url.Values{
 		"camID":     {camID},
 		"sessionID": {sessionID},
 		"fileName":  {fileName},
-	}.Encode()
+	}
+	if isDownload {
+		q.Set("download", "true")
+	}
+	reqURL := serverBaseURL + "/presign?" + q.Encode()
 
 	resp, err := http.Get(reqURL)
 	if err != nil {
@@ -344,6 +390,53 @@ func runPresignedURLForUpload(presignedURL, path string) bool {
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		fmt.Println("上传失败:", resp.Status, strings.TrimSpace(string(body)))
+		return false
+	}
+	return true
+}
+
+// 执行预签名url下载文件
+func runPresignedURLForDownload(presignedURL, path string) bool {
+	if presignedURL == "" {
+		fmt.Println("预签名url为空")
+		return false
+	}
+
+	req, err := http.NewRequest(http.MethodGet, presignedURL, nil)
+	if err != nil {
+		fmt.Println("创建下载请求失败:", err)
+		return false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Println("下载失败:", err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Println("下载失败:", resp.Status, strings.TrimSpace(string(body)))
+		return false
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		fmt.Println("创建本地下载目录失败:", err)
+		return false
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		fmt.Println("创建本地文件失败:", err)
+		return false
+	}
+	_, err = io.Copy(f, resp.Body)
+	closeErr := f.Close()
+	if err != nil || closeErr != nil {
+		if err == nil {
+			err = closeErr
+		}
+		fmt.Println("写入本地文件失败:", err)
+		_ = os.Remove(path)
 		return false
 	}
 	return true
