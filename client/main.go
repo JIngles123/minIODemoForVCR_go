@@ -2,17 +2,30 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
 
 var serverBaseURL = "http://localhost:9097" // server的地址
+
+const (
+	multipartThreshold = 2 * 1024 * 1024 // 超过 2MB 走分片上传
+	multipartPartSize  = 5 * 1024 * 1024 // S3/MinIO 非最后分片最小 5MB
+)
+
+type completedPartJSON struct {
+	PartNumber int32  `json:"PartNumber"`
+	ETag       string `json:"ETag"`
+}
 
 func main() {
 	// 用 bufio.Scanner 包装标准输入，按行读取
@@ -63,7 +76,7 @@ func main() {
 			} else {
 				fmt.Println("删除失败")
 			}
-		}else if line == "5" { // 直接上传
+		} else if line == "5" { // 直接上传，不考虑大文件切片上传
 			fmt.Println("输入要上传的 camID|sessionID|fileName :")
 			scanner.Scan()
 			line := scanner.Text()
@@ -90,7 +103,7 @@ func main() {
 			} else {
 				fmt.Println("上传失败")
 			}
-		} else if line == "6" { // 获取预签名url上传
+		} else if line == "6" { // 获取预签名url上传，考虑大文件切片上传
 			fmt.Println("输入要上传的 camID|sessionID|fileName :")
 			scanner.Scan()
 			line := scanner.Text()
@@ -106,35 +119,60 @@ func main() {
 			fmt.Println("camID:", camID, ", sessionID:", sessionID, ", fileName:", fileName)
 			// 检查文件夹是否存在
 			var path string = filepath.Join("./EvtvcrForTest", camID, sessionID, fileName)
-			if _, err := os.Stat(path); os.IsNotExist(err) {
+			info, err := os.Stat(path)
+			if os.IsNotExist(err) {
 				fmt.Println("文件夹不存在")
 				printOptions()
 				continue
 			}
-			presignedURL := getPresignedUrl(camID, sessionID, fileName, false)
+			isMultipartUpload := false
+			if info.Size() > multipartThreshold {
+				fmt.Println("文件大小 > 2MB，需分片上传")
+				isMultipartUpload = true
+			}
+			var uploadID string
+			var presignedURL string
+			if isMultipartUpload {
+				uploadID = initMultipartUpload(camID, sessionID, fileName)
+				if uploadID == "" {
+					fmt.Println("初始化分片上传失败")
+					printOptions()
+					continue
+				}
+				presignedURL = getPresignedPartUrl(camID, sessionID, fileName, uploadID, 1)
+			} else {
+				presignedURL = getPresignedUrl(camID, sessionID, fileName, false)
+			}
 			if presignedURL == "" {
 				fmt.Println("获取预签名url失败")
+				abortMultipartUpload(camID, sessionID, fileName, uploadID)
 				printOptions()
 				continue
 			}
-			fmt.Println("预签名url(有效期10分钟):", presignedURL)
+			if isMultipartUpload {
+				fmt.Println("第一个分片的预签名url(有效期10分钟):", presignedURL)
+			} else {
+				fmt.Println("预签名url(有效期10分钟):", presignedURL)
+			}
 			fmt.Println("是否上传(y/n):")
 			scanner.Scan()
 			line = scanner.Text()
 			if line == "y" {
 				fmt.Println("上传中...")
-				isSuccess := runPresignedURLForUpload(presignedURL, path)
+				var isSuccess bool
+				if isMultipartUpload {
+					isSuccess = uploadMultipartFile(camID, sessionID, fileName, path, uploadID, presignedURL)
+				} else {
+					isSuccess = runPresignedURLForUpload(presignedURL, path)
+				}
 				if isSuccess {
 					addOrRemoveUploadedFlagToFileOrDir(path, true)
 				} else {
 					fmt.Println("上传失败")
 				}
-				printOptions()
-				continue
 			} else {
-				fmt.Println("取消上传，可后续自行执行curl命令上传")
-				printOptions()
-				continue
+				abortMultipartUpload(camID, sessionID, fileName, uploadID)
+			    fmt.Println("取消上传，可后续自行执行curl命令上传")
 			}
 		} else if line == "7" { // 直接下载
 			fmt.Println("输入要下载的 camID|sessionID|fileName :")
@@ -222,8 +260,8 @@ func printOptions() {
 	fmt.Println("2. 查询当前所有上传成功的文件列表")
 	fmt.Println("3. 查询MinIO上已有的文件列表")
 	fmt.Println("4. 删除MinIO上的指定文件")
-	fmt.Println("5. 输入要上传的session文件(camID|sessionID|fileName), 直接上传")
-	fmt.Println("6. 输入要上传的session文件(camID|sessionID|fileName), 获取预签名url")
+	fmt.Println("5. 输入要上传的session文件(camID|sessionID|fileName), 直接上传，大文件不考虑切片上传")
+	fmt.Println("6. 输入要上传的session文件(camID|sessionID|fileName), 获取预签名url，大文件(>2MB)时考虑切片上传")
 	fmt.Println("7. 输入要下载的session文件(camID|sessionID|fileName), 直接下载")
 	fmt.Println("8. 输入要下载的session文件(camID|sessionID|fileName), 获取预签名url")
 }
@@ -281,6 +319,14 @@ func queryAllSessionsListNeedUpload(isNeedUploaded bool) []string {
 
 // 向server申请上传或下载的预签名URL
 func getPresignedUrl(camID, sessionID, fileName string, isDownload bool) string {
+	return requestPresignedUrl(camID, sessionID, fileName, isDownload, "", 0)
+}
+
+func getPresignedPartUrl(camID, sessionID, fileName, uploadID string, partNumber int) string {
+	return requestPresignedUrl(camID, sessionID, fileName, false, uploadID, partNumber)
+}
+
+func requestPresignedUrl(camID, sessionID, fileName string, isDownload bool, uploadID string, partNumber int) string {
 	q := url.Values{
 		"camID":     {camID},
 		"sessionID": {sessionID},
@@ -288,6 +334,10 @@ func getPresignedUrl(camID, sessionID, fileName string, isDownload bool) string 
 	}
 	if isDownload {
 		q.Set("download", "true")
+	}
+	if uploadID != "" && partNumber > 0 {
+		q.Set("uploadId", uploadID)
+		q.Set("partNumber", strconv.Itoa(partNumber))
 	}
 	reqURL := serverBaseURL + "/presign?" + q.Encode()
 
@@ -409,7 +459,200 @@ func deleteObjectFromMinio(camID, sessionID, fileName string) bool {
 	return true
 }
 
-// 执行预签名url上传文件
+func initMultipartUpload(camID, sessionID, fileName string) string {
+	reqURL := serverBaseURL + "/multipart/init?" + url.Values{
+		"camID":     {camID},
+		"sessionID": {sessionID},
+		"fileName":  {fileName},
+	}.Encode()
+
+	resp, err := http.Get(reqURL)
+	if err != nil {
+		fmt.Println("初始化分片上传失败:", err)
+		return ""
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Println("读取分片上传 uploadId 失败:", err)
+		return ""
+	}
+	if resp.StatusCode != http.StatusOK {
+		fmt.Println("初始化分片上传失败:", resp.Status, strings.TrimSpace(string(body)))
+		return ""
+	}
+	return strings.TrimSpace(string(body))
+}
+
+func completeMultipartUpload(camID, sessionID, fileName, uploadID string, parts []completedPartJSON) bool {
+	payload, err := json.Marshal(parts)
+	if err != nil {
+		fmt.Println("编码分片列表失败:", err)
+		return false
+	}
+	reqURL := serverBaseURL + "/multipart/complete?" + url.Values{
+		"camID":     {camID},
+		"sessionID": {sessionID},
+		"fileName":  {fileName},
+		"uploadId":  {uploadID},
+	}.Encode()
+
+	req, err := http.NewRequest(http.MethodPost, reqURL, bytes.NewReader(payload))
+	if err != nil {
+		fmt.Println("创建合并分片请求失败:", err)
+		return false
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Println("合并分片失败:", err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		fmt.Println("合并分片失败:", resp.Status, strings.TrimSpace(string(body)))
+		return false
+	}
+	if msg := strings.TrimSpace(string(body)); msg != "" {
+		fmt.Println(msg)
+	}
+	return true
+}
+
+// 中止未完成的分片上传，删除 MinIO 上已写入的分片数据。
+func abortMultipartUpload(camID, sessionID, fileName, uploadID string) {
+	if uploadID == "" {
+		return
+	}
+	reqURL := serverBaseURL + "/multipart/abort?" + url.Values{
+		"camID":     {camID},
+		"sessionID": {sessionID},
+		"fileName":  {fileName},
+		"uploadId":  {uploadID},
+	}.Encode()
+
+	resp, err := http.Get(reqURL)
+	if err != nil {
+		fmt.Println("删除未完成分片失败:", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		fmt.Println("删除未完成分片失败:", resp.Status, strings.TrimSpace(string(body)))
+		return
+	}
+	if msg := strings.TrimSpace(string(body)); msg != "" {
+		fmt.Println(msg)
+	}
+}
+
+// 执行预签名url上传文件,分片传输。任一分片失败时中止并删除已上传分片。
+func uploadMultipartFile(camID, sessionID, fileName, path, uploadID, firstPresignedURL string) bool {
+	fi, err := os.Open(path)
+	if err != nil {
+		fmt.Println("打开文件失败:", err)
+		abortMultipartUpload(camID, sessionID, fileName, uploadID)
+		return false
+	}
+	defer fi.Close()
+
+	stat, err := fi.Stat()
+	if err != nil {
+		fmt.Println("读取文件信息失败:", err)
+		abortMultipartUpload(camID, sessionID, fileName, uploadID)
+		return false
+	}
+
+	totalSize := stat.Size()
+	if totalSize == 0 {
+		fmt.Println("空文件不支持分片上传")
+		abortMultipartUpload(camID, sessionID, fileName, uploadID)
+		return false
+	}
+
+	var parts []completedPartJSON
+	var offset int64
+	partNumber := 1
+	presignedURL := firstPresignedURL
+
+	for offset < totalSize {
+		partSize := int64(multipartPartSize)
+		remain := totalSize - offset
+		if remain < partSize {
+			partSize = remain
+		}
+
+		if presignedURL == "" {
+			presignedURL = getPresignedPartUrl(camID, sessionID, fileName, uploadID, partNumber)
+			if presignedURL == "" {
+				fmt.Println("获取第", partNumber, "个分片的预签名url失败")
+				abortMultipartUpload(camID, sessionID, fileName, uploadID)
+				return false
+			}
+		}
+
+		fmt.Printf("第%d个分片的预签名url(有效期10分钟): %s\n", partNumber, presignedURL)
+		fmt.Printf("上传第%d个分片 (%d ~ %d 字节)...\n", partNumber, offset, offset+partSize-1)
+
+		section := io.NewSectionReader(fi, offset, partSize)
+		etag, ok := runPresignedURLForUploadPart(presignedURL, section, partSize)
+		if !ok {
+			abortMultipartUpload(camID, sessionID, fileName, uploadID)
+			return false
+		}
+		parts = append(parts, completedPartJSON{
+			PartNumber: int32(partNumber),
+			ETag:       etag,
+		})
+
+		offset += partSize
+		partNumber++
+		presignedURL = ""
+	}
+
+	if !completeMultipartUpload(camID, sessionID, fileName, uploadID, parts) {
+		abortMultipartUpload(camID, sessionID, fileName, uploadID)
+		return false
+	}
+	return true
+}
+
+func runPresignedURLForUploadPart(presignedURL string, body io.Reader, size int64) (string, bool) {
+	req, err := http.NewRequest(http.MethodPut, presignedURL, body)
+	if err != nil {
+		fmt.Println("创建分片上传请求失败:", err)
+		return "", false
+	}
+	req.ContentLength = size
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Println("分片上传失败:", err)
+		return "", false
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		fmt.Println("分片上传失败:", resp.Status, strings.TrimSpace(string(respBody)))
+		return "", false
+	}
+	etag := strings.TrimSpace(resp.Header.Get("ETag"))
+	if etag == "" {
+		fmt.Println("分片上传失败: 响应缺少 ETag")
+		return "", false
+	}
+	fmt.Println("分片上传成功, ETag:", etag)
+	return etag, true
+}
+
+// 执行预签名url上传文件,不分片传输
 func runPresignedURLForUpload(presignedURL, path string) bool {
 	fi, err := os.Open(path)
 	if err != nil {

@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -61,6 +63,11 @@ func main() {
 	http.HandleFunc("/list", handleList)
 	http.HandleFunc("/presign", handlePresign)
 	http.HandleFunc("/delete", handleDelete)
+	
+	// 分片上传
+	http.HandleFunc("/multipart/init", handleMultipartInit)
+	http.HandleFunc("/multipart/complete", handleMultipartComplete)
+	http.HandleFunc("/multipart/abort", handleMultipartAbort)
 
 	log.Printf("HTTP Server 启动，监听 %s", ListenAddr)
 	log.Fatal(http.ListenAndServe(ListenAddr, nil))
@@ -215,6 +222,23 @@ func handlePresign(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		outURL = out.URL
+	} else if uploadID := r.URL.Query().Get("uploadId"); uploadID != "" {
+		partNumber, err := strconv.ParseInt(r.URL.Query().Get("partNumber"), 10, 32)
+		if err != nil || partNumber < 1 {
+			http.Error(w, "缺少或非法 partNumber", http.StatusBadRequest)
+			return
+		}
+		out, err := presignClient.PresignUploadPart(context.TODO(), &s3.UploadPartInput{
+			Bucket:     aws.String(MinioBucket),
+			Key:        aws.String(key),
+			UploadId:   aws.String(uploadID),
+			PartNumber: aws.Int32(int32(partNumber)),
+		}, s3.WithPresignExpires(PresignExpire))
+		if err != nil {
+			http.Error(w, "生成分片预签名url失败: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		outURL = out.URL
 	} else {
 		out, err := presignClient.PresignPutObject(context.TODO(), &s3.PutObjectInput{
 			Bucket: aws.String(MinioBucket),
@@ -250,4 +274,103 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	fmt.Fprintf(w, "删除成功: %s/%s\n", bucket, key)
+}
+
+func objectKeyFromQuery(r *http.Request) (string, bool) {
+	camID := r.URL.Query().Get("camID")
+	sessionID := r.URL.Query().Get("sessionID")
+	fileName := r.URL.Query().Get("fileName")
+	if camID == "" || sessionID == "" || fileName == "" {
+		return "", false
+	}
+	return camID + "/" + sessionID + "/" + fileName, true
+}
+
+func handleMultipartInit(w http.ResponseWriter, r *http.Request) {
+	key, ok := objectKeyFromQuery(r)
+	if !ok {
+		http.Error(w, "缺少 camID 或 sessionID 或 fileName 参数", http.StatusBadRequest)
+		return
+	}
+
+	out, err := s3Client.CreateMultipartUpload(context.TODO(), &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(MinioBucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		http.Error(w, "初始化分片上传失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if out.UploadId == nil || *out.UploadId == "" {
+		http.Error(w, "初始化分片上传失败: 空 uploadId", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	fmt.Fprint(w, *out.UploadId)
+}
+
+func handleMultipartComplete(w http.ResponseWriter, r *http.Request) {
+	key, ok := objectKeyFromQuery(r)
+	if !ok {
+		http.Error(w, "缺少 camID 或 sessionID 或 fileName 参数", http.StatusBadRequest)
+		return
+	}
+	uploadID := r.URL.Query().Get("uploadId")
+	if uploadID == "" {
+		http.Error(w, "缺少 uploadId", http.StatusBadRequest)
+		return
+	}
+
+	var parts []types.CompletedPart
+	if err := json.NewDecoder(r.Body).Decode(&parts); err != nil {
+		http.Error(w, "解析分片列表失败: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if len(parts) == 0 {
+		http.Error(w, "分片列表为空", http.StatusBadRequest)
+		return
+	}
+
+	_, err := s3Client.CompleteMultipartUpload(context.TODO(), &s3.CompleteMultipartUploadInput{
+		Bucket:   aws.String(MinioBucket),
+		Key:      aws.String(key),
+		UploadId: aws.String(uploadID),
+		MultipartUpload: &types.CompletedMultipartUpload{
+			Parts: parts,
+		},
+	})
+	if err != nil {
+		http.Error(w, "合并分片失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	fmt.Fprintf(w, "分片上传完成: %s/%s\n", MinioBucket, key)
+}
+
+func handleMultipartAbort(w http.ResponseWriter, r *http.Request) {
+	key, ok := objectKeyFromQuery(r)
+	if !ok {
+		http.Error(w, "缺少 camID 或 sessionID 或 fileName 参数", http.StatusBadRequest)
+		return
+	}
+	uploadID := r.URL.Query().Get("uploadId")
+	if uploadID == "" {
+		http.Error(w, "缺少 uploadId", http.StatusBadRequest)
+		return
+	}
+
+	_, err := s3Client.AbortMultipartUpload(context.TODO(), &s3.AbortMultipartUploadInput{
+		Bucket:   aws.String(MinioBucket),
+		Key:      aws.String(key),
+		UploadId: aws.String(uploadID),
+	})
+	if err != nil {
+		http.Error(w, "删除未完成分片失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	fmt.Fprintf(w, "已中止分片上传并删除已上传分片: %s/%s\n", MinioBucket, key)
 }
