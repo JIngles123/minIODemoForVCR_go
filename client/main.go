@@ -616,6 +616,9 @@ func uploadMultipartFile(camID, sessionID, fileName, path, uploadID, firstPresig
 		presignedURL = ""
 	}
 
+	fmt.Println("分片上传完成，开始合并分片...")
+	fmt.Println("分片合并参数为 uploadId: ", uploadID, ", ETags: ", parts)
+
 	if !completeMultipartUpload(camID, sessionID, fileName, uploadID, parts) {
 		abortMultipartUpload(camID, sessionID, fileName, uploadID)
 		return false
