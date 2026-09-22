@@ -23,7 +23,7 @@ import (
 
 // ---------- 配置 ----------
 const (
-	MinioEndpoint  = "http://localhost:9000" // 你的 MinIO 地址
+	MinioEndpoint  = "http://localhost:9000" // MinIO 地址
 	MinioAccessKey = "jlmtest"               // 默认用户名
 	MinioSecretKey = "jlmtestpwd"            // 默认密码
 	MinioBucket    = "evtvcr"
