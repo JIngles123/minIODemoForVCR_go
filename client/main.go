@@ -37,6 +37,7 @@ func main() {
 	for scanner.Scan() {
 		// scanner.Text() 拿到当前行（不含换行符）
 		line := scanner.Text()
+		fmt.Println("----------------------------------------------------------------");
 
 		if line == "1" {
 			fmt.Println("当前所有待上传的文件列表(camID|sessionID|fileName):")
@@ -255,8 +256,7 @@ func main() {
 }
 
 func printOptions() {
-	fmt.Printf("\n[%s] 输入内容（输入 quit or q 退出）：\n", time.Now().Format("2006-01-02 15:04:05"))
-	fmt.Println("1. 查询当前所有待上传的文件列表")
+	fmt.Println("\n1. 查询当前所有待上传的文件列表")
 	fmt.Println("2. 查询当前所有上传成功的文件列表")
 	fmt.Println("3. 查询MinIO上已有的文件列表")
 	fmt.Println("4. 删除MinIO上的指定文件")
@@ -264,6 +264,7 @@ func printOptions() {
 	fmt.Println("6. 输入要上传的session文件(camID|sessionID|fileName), 获取预签名url，大文件(>2MB)时考虑切片上传")
 	fmt.Println("7. 输入要下载的session文件(camID|sessionID|fileName), 直接下载")
 	fmt.Println("8. 输入要下载的session文件(camID|sessionID|fileName), 获取预签名url")
+	fmt.Printf("[%s] 输入功能序号（输入 quit or q 退出）：", time.Now().Format("2006-01-02 15:04:05"))
 }
 
 func queryAllSessionsListNeedUpload(isNeedUploaded bool) []string {
