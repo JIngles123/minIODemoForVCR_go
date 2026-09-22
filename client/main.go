@@ -118,7 +118,26 @@ func main() {
 				continue
 			}
 		} else if line == "6" { // 直接下载
-			fmt.Println("请输入camID-sessionID:")
+			fmt.Println("输入要下载的 camID|sessionID|fileName :")
+			scanner.Scan()
+			line := scanner.Text()
+			var parts []string = strings.Split(line, "|")
+			if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+				fmt.Println("camID|sessionID|fileName格式错误")
+				printOptions()
+				continue
+			}
+			var camID string = parts[0]
+			var sessionID string = parts[1]
+			var fileName string = parts[2]
+			fmt.Println("camID:", camID, ", sessionID:", sessionID, ", fileName:", fileName)
+			fmt.Println("下载中...")
+			ok, savedPath := downloadFileViaServer(camID, sessionID, fileName)
+			if ok {
+				fmt.Println("下载成功，文件已保存到:", savedPath)
+			} else {
+				fmt.Println("下载失败")
+			}
 		} else if line == "7" { // 获取预签名url下载
 			fmt.Println("请输入camID-sessionID:")
 		}
@@ -383,4 +402,49 @@ func addUploadedFlagToFileOrDir(path string) {
 	if err := os.Rename(dir, dir+flag); err != nil {
 		fmt.Println("文件夹添加uploaded标记失败:", err)
 	}
+}
+
+// 下载文件到当前目录，返回是否成功以及本地保存路径。
+func downloadFileViaServer(camID, sessionID, fileName string) (bool, string) {
+	reqURL := serverBaseURL + "/download?" + url.Values{
+		"bucket": {"evtvcr"},
+		"key":    {camID + "/" + sessionID + "/" + fileName},
+	}.Encode()
+
+	resp, err := http.Get(reqURL)
+	if err != nil {
+		fmt.Println("下载失败:", err)
+		return false, ""
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Println("下载失败:", resp.Status, strings.TrimSpace(string(body)))
+		return false, ""
+	}
+
+	localDir := filepath.Join(".", "client", "DirectDownloadFromMinIO")
+	if err := os.MkdirAll(localDir, 0o755); err != nil {
+		fmt.Println("创建本地下载目录失败:", err)
+		return false, ""
+	}
+	localPath := filepath.Join(localDir, filepath.Base(fileName))
+	f, err := os.Create(localPath)
+	if err != nil {
+		fmt.Println("创建本地文件失败:", err)
+		return false, ""
+	}
+
+	_, err = io.Copy(f, resp.Body)
+	closeErr := f.Close()
+	if err != nil || closeErr != nil {
+		if err == nil {
+			err = closeErr
+		}
+		fmt.Println("写入本地文件失败:", err)
+		_ = os.Remove(localPath)
+		return false, ""
+	}
+	return true, localPath
 }

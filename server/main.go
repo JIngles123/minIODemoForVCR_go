@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -179,7 +180,11 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	fmt.Fprintf(w, "桶 %s 中的对象:\n", bucket)
 	for _, obj := range output.Contents {
-		fmt.Fprintf(w, "- %s (大小: %d 字节)\n", *obj.Key, obj.Size)
+		keyStr := *obj.Key
+		camID := strings.Split(keyStr, "/")[0]
+		sessionID := strings.Split(keyStr, "/")[1]
+		fileName := strings.Split(keyStr, "/")[2]
+		fmt.Fprintf(w, "- %s (大小: %d 字节) -> %s\n", *obj.Key, obj.Size, camID + "|" + sessionID + "|" + fileName)
 	}
 }
 
