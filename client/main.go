@@ -33,11 +33,10 @@ func main() {
 
 	printOptions()
 
-	// 循环：只要还能读到下一行，就继续
 	for scanner.Scan() {
 		// scanner.Text() 拿到当前行（不含换行符）
 		line := scanner.Text()
-		fmt.Println("----------------------------------------------------------------");
+		fmt.Println("----------------------------------------------------------------")
 
 		if line == "1" {
 			fmt.Println("当前所有待上传的文件列表(camID|sessionID|fileName):")
@@ -173,7 +172,7 @@ func main() {
 				}
 			} else {
 				abortMultipartUpload(camID, sessionID, fileName, uploadID)
-			    fmt.Println("取消上传，可后续自行执行curl命令上传")
+				fmt.Println("取消上传，可后续自行执行curl命令上传")
 			}
 		} else if line == "7" { // 直接下载
 			fmt.Println("输入要下载的 camID|sessionID|fileName :")
@@ -444,7 +443,7 @@ func deleteObjectFromMinio(camID, sessionID, fileName string) bool {
 		return false
 	}
 	defer resp.Body.Close()
-	
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		fmt.Println("读取删除文件失败:", err)
